@@ -255,6 +255,10 @@ def render_stored_data(config) -> None:
 
     if rows:
         df = pd.DataFrame(rows)
+        # Databases created before Phase 2 do not have a volume_real column.
+        # Keep the dashboard usable while their existing rows are migrated.
+        if "volume_real" not in df.columns:
+            df["volume_real"] = 0.0
         df["time_utc"] = pd.to_datetime(df["time_msc"], unit="ms", utc=True)
         df["spread"] = df["ask"] - df["bid"]
         st.dataframe(
