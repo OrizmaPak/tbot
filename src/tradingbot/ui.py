@@ -312,7 +312,9 @@ def render_ai_training(config) -> None:
         try:
             with st.spinner("Loading broker-available M1 candles..."):
                 with MT5Client(config.mt5) as mt5:
-                    report = collect_all_m1(mt5, config.symbol, config.data_dir)
+                    # M1 collection is compact and this dashboard commonly runs
+                    # alongside MT5, so use a lower guard than model training.
+                    report = collect_all_m1(mt5, config.symbol, config.data_dir, min_ram_mb=400)
             st.success(f"Loaded {report['rows']:,} M1 candles.")
             st.json(report)
         except (MT5ConnectionError, RuntimeError, ValueError, OSError) as error:
