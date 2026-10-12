@@ -1,3 +1,8 @@
 MetaTrader5>=5.0
 pandas>=2.2
 streamlit>=1.38
+pyarrow>=18
+lightgbm>=4.5
+scikit-learn>=1.6
+joblib>=1.4
+psutil>=6

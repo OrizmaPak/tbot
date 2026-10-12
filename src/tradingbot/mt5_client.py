@@ -143,6 +143,7 @@ class MT5Client(AbstractContextManager["MT5Client"]):
             last=float(tick.last),
             volume=int(tick.volume),
             flags=int(tick.flags),
+            volume_real=float(getattr(tick, "volume_real", 0.0)),
         )
 
     def export_ticks(self, symbol: str, start: datetime, end: datetime, output_path: Path) -> int:
@@ -162,6 +163,15 @@ class MT5Client(AbstractContextManager["MT5Client"]):
                 writer.writerow({field: tick[field] for field in fieldnames})
 
         return len(ticks)
+
+    def history_ticks(self, symbol: str, start: datetime, end: datetime):
+        self.ensure_symbol(symbol)
+        ticks = self.mt5.copy_ticks_range(
+            symbol, self._as_utc(start), self._as_utc(end), self.mt5.COPY_TICKS_ALL
+        )
+        if ticks is None:
+            raise MT5ConnectionError(self._format_last_error("Historical tick retrieval failed"))
+        return ticks
 
     @staticmethod
     def _import_mt5() -> ModuleType:
