@@ -17,7 +17,7 @@ from tradingbot.storage import TickStore
 from tradingbot.history import available_parts, collect_history
 from tradingbot.history import resource_guard
 from tradingbot.model import load_model, predict, recommend, train_models
-from tradingbot.bars import collect_all_m1, m1_metadata_path
+from tradingbot.bars import collect_all_m1, load_m1_bars, m1_metadata_path
 
 
 DEFAULT_CONFIG = "config.json"
@@ -325,6 +325,16 @@ def render_ai_training(config) -> None:
         cols[2].metric("Newest", metadata["newest_utc"][:10])
         cols[3].metric("File", f"{m1_meta.with_suffix('.parquet').stat().st_size / 1024**2:.1f} MB")
         st.caption("Loaded source data is ready for the next feature-building step. No training starts from this button.")
+        preview_rows = st.number_input("M1 rows to preview", min_value=10, max_value=500, value=100, step=10)
+        if st.checkbox("Show newest loaded M1 candles"):
+            try:
+                preview = load_m1_bars(config.data_dir, config.symbol).tail(int(preview_rows)).copy()
+                st.dataframe(
+                    preview[["timestamp_utc", "symbol", "open", "high", "low", "close", "tick_volume", "spread"]],
+                    width="stretch",
+                )
+            except (RuntimeError, OSError, ValueError) as error:
+                st.error(f"Could not read M1 data: {error}")
     else:
         st.info("No M1 source data loaded yet.")
     st.divider()
