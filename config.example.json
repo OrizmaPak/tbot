@@ -1,0 +1,14 @@
+{
+  "symbol": "XAUUSD",
+  "data_dir": "data",
+  "poll_seconds": 1.0,
+  "max_tick_age_seconds": 10,
+  "mt5": {
+    "terminal_path": null,
+    "login": null,
+    "server": null,
+    "password_env": "MT5_PASSWORD",
+    "timeout_ms": 60000,
+    "portable": false
+  }
+}

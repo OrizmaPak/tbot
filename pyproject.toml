@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-burst-trading-system"
+version = "0.1.0"
+description = "Phase 1 MT5 market-data collector for the AI Burst Trading System."
+requires-python = ">=3.11"
+dependencies = [
+  "MetaTrader5>=5.0",
+  "pandas>=2.2",
+  "streamlit>=1.38"
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
