@@ -17,6 +17,7 @@ from tradingbot.storage import TickStore
 from tradingbot.history import available_parts, collect_history
 from tradingbot.history import resource_guard
 from tradingbot.model import load_model, predict, recommend, train_models
+from tradingbot.bars import collect_all_m1, m1_metadata_path
 
 
 DEFAULT_CONFIG = "config.json"
@@ -305,6 +306,28 @@ def render_config(config_path: str) -> None:
 
 def render_ai_training(config) -> None:
     st.subheader("AI Training")
+    st.write("M1 candle source data")
+    m1_meta = m1_metadata_path(config.data_dir, config.symbol)
+    if st.button("Load all available M1 candles from MT5", type="primary"):
+        try:
+            with st.spinner("Loading broker-available M1 candles..."):
+                with MT5Client(config.mt5) as mt5:
+                    report = collect_all_m1(mt5, config.symbol, config.data_dir)
+            st.success(f"Loaded {report['rows']:,} M1 candles.")
+            st.json(report)
+        except (MT5ConnectionError, RuntimeError, ValueError, OSError) as error:
+            st.error(str(error))
+    if m1_meta.exists():
+        metadata = json.loads(m1_meta.read_text(encoding="utf-8"))
+        cols = st.columns(4)
+        cols[0].metric("M1 candles", f"{metadata['rows']:,}")
+        cols[1].metric("Oldest", metadata["oldest_utc"][:10])
+        cols[2].metric("Newest", metadata["newest_utc"][:10])
+        cols[3].metric("File", f"{m1_meta.with_suffix('.parquet').stat().st_size / 1024**2:.1f} MB")
+        st.caption("Loaded source data is ready for the next feature-building step. No training starts from this button.")
+    else:
+        st.info("No M1 source data loaded yet.")
+    st.divider()
     files = sorted((config.data_dir / "datasets").glob("*.parquet"))
     if not files:
         st.info("No feature dataset yet. Collect history, then run make-dataset from PowerShell.")

@@ -13,6 +13,7 @@ from .history import collect_history, load_ticks, resource_guard
 from .research import TradeAssumptions, create_dataset, save_dataset
 from .model import train_models, walk_forward_summary
 from .simulation import RiskLimits, backtest, performance, research_patterns
+from .bars import collect_all_m1
 import pandas as pd
 
 
@@ -40,6 +41,15 @@ def main() -> int:
             warnings = [x for x in reports if x.get("empty") or x.get("invalid_quotes") or x.get("gaps_over_threshold")]
             print(json.dumps({"windows": len(reports), "ticks": sum(x["ticks"] for x in reports),
                               "warning_windows": len(warnings), "first_warnings": warnings[:5]}, indent=2))
+            return 0
+        if args.command == "load-m1":
+            with MT5Client(config.mt5) as mt5:
+                report = collect_all_m1(
+                    mt5, config.symbol, config.data_dir,
+                    chunk_bars=args.chunk_bars,
+                    max_bars=args.max_bars,
+                )
+            print(json.dumps(report, indent=2))
             return 0
         if args.command == "make-dataset":
             resource_guard(config.data_dir)
@@ -190,6 +200,13 @@ def build_parser() -> argparse.ArgumentParser:
     history.add_argument("--to", dest="end", required=True)
     history.add_argument("--chunk-minutes", type=int, default=60)
     history.add_argument("--max-ticks-per-chunk", type=int, default=250_000)
+    m1 = subparsers.add_parser(
+        "load-m1",
+        help="Load all broker/terminal-available one-minute candles",
+        parents=[config_parent],
+    )
+    m1.add_argument("--chunk-bars", type=int, default=10_000)
+    m1.add_argument("--max-bars", type=int, default=2_000_000)
     dataset = subparsers.add_parser("make-dataset", parents=[config_parent])
     dataset.add_argument("--from", dest="start", required=True)
     dataset.add_argument("--to", dest="end", required=True)

@@ -173,6 +173,13 @@ class MT5Client(AbstractContextManager["MT5Client"]):
             raise MT5ConnectionError(self._format_last_error("Historical tick retrieval failed"))
         return ticks
 
+    def history_m1_from_pos(self, symbol: str, start_pos: int, count: int):
+        self.ensure_symbol(symbol)
+        bars = self.mt5.copy_rates_from_pos(symbol, self.mt5.TIMEFRAME_M1, start_pos, count)
+        if bars is None:
+            raise MT5ConnectionError(self._format_last_error("Historical M1 retrieval failed"))
+        return bars
+
     @staticmethod
     def _import_mt5() -> ModuleType:
         try:

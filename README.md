@@ -42,6 +42,14 @@ Phase 1 commands remain available:
 
 ## Build research datasets
 
+Load the complete one-minute candle history exposed by the connected broker and MT5 terminal. This stores raw M1 source data only; it does not train a model.
+
+```powershell
+.\.venv\Scripts\python.exe -m tradingbot.cli load-m1 --config config.json
+```
+
+The output is `data/bars/XAUUSD_M1.parquet` with a matching JSON metadata report. MT5 history is constrained by broker retention and the terminal's **Max bars in chart** setting. The default safety limit is 2,000,000 candles; increase it only after checking available disk and RAM with `--max-bars`.
+
 Generate a bounded interval that has already been collected. The output Parquet contains past-only features and BUY/SELL labels for 60, 120, and 180 seconds. Its adjacent JSON file records feature definitions and execution assumptions.
 
 ```powershell

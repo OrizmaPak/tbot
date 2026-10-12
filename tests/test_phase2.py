@@ -12,6 +12,7 @@ from tradingbot.model import FEATURES, load_model, predict, recommend, train_mod
 from tradingbot.research import TradeAssumptions, build_features, feature_definitions, label_opportunity, pnl_usd
 from tradingbot.simulation import RiskLimits, backtest, performance, simulate_basket
 from tradingbot.storage import TickRecord, TickStore
+from tradingbot.bars import normalize_m1_rates
 import json
 import sqlite3
 from dataclasses import asdict
@@ -37,6 +38,18 @@ def test_full_quote_duplicate_and_utc(tmp_path):
     frame = normalize_ticks(quotes(2).to_records(index=False), "XAUUSD")
     assert frame.timestamp_utc.dt.tz is not None
     assert frame.timestamp_utc.iloc[0] == pd.Timestamp(1_700_000_000_000, unit="ms", tz="UTC")
+
+
+def test_m1_normalization_is_utc_sorted_and_deduplicated():
+    rates = np.array([(120, 2, 3, 1, 2.5, 10, 4, 10), (60, 1, 2, 0, 1.5, 8, 3, 8),
+                      (60, 1, 2, 0, 1.5, 8, 3, 8)], dtype=[
+        ("time", "i8"), ("open", "f8"), ("high", "f8"), ("low", "f8"),
+        ("close", "f8"), ("tick_volume", "i8"), ("spread", "i8"), ("real_volume", "i8")])
+    frame = normalize_m1_rates(rates, "XAUUSD")
+    assert len(frame) == 2
+    assert frame.time.tolist() == [60, 120]
+    assert str(frame.timestamp_utc.dt.tz) == "UTC"
+    assert frame.timestamp_utc.iloc[0] == pd.Timestamp(60, unit="s", tz="UTC")
 
 
 def test_history_collection_resume_and_distinct_same_millisecond(tmp_path):
