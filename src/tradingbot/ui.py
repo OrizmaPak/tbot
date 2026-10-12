@@ -14,10 +14,11 @@ import psutil
 from tradingbot.config import load_config
 from tradingbot.mt5_client import MT5Client, MT5ConnectionError
 from tradingbot.storage import TickStore
-from tradingbot.history import available_parts, collect_history
+from tradingbot.history import available_parts, collect_history, load_ticks
 from tradingbot.history import resource_guard
 from tradingbot.model import load_model, predict, recommend, train_models
 from tradingbot.bars import collect_all_m1, load_m1_bars, m1_metadata_path
+from tradingbot.research import TradeAssumptions, create_dataset, save_dataset
 
 
 DEFAULT_CONFIG = "config.json"
@@ -340,9 +341,76 @@ def render_ai_training(config) -> None:
     else:
         st.info("No M1 source data loaded yet.")
     st.divider()
+
+    st.subheader("Create a training dataset")
+    st.caption("This step reads MT5 ticks, creates past-only features and labels, and saves a dataset for training.")
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    default_start = now - timedelta(hours=24)
+    col_a, col_b, col_c = st.columns(3)
+    start_date = col_a.date_input("Training start date (UTC)", value=default_start.date(), key="training_start_date")
+    start_time = col_a.time_input("Training start time (UTC)", value=default_start.time(), key="training_start_time")
+    end_date = col_b.date_input("Training end date (UTC)", value=now.date(), key="training_end_date")
+    end_time = col_b.time_input("Training end time (UTC)", value=now.time(), key="training_end_time")
+    sample_seconds = col_c.number_input("Decision interval (seconds)", min_value=5, max_value=300, value=10, step=5)
+    chunk_minutes = st.number_input("MT5 collection window (minutes)", min_value=5, max_value=240, value=30, step=5)
+    with st.expander("Training assumptions"):
+        st.caption("These defaults describe the research labels and estimated execution costs. Adjust them to match your broker account.")
+        lots = st.number_input("Lots", min_value=0.01, max_value=10.0, value=0.1, step=0.01)
+        commission = st.number_input("Round-trip commission per lot (USD)", min_value=0.0, max_value=100.0, value=7.0, step=0.5)
+        slippage = st.number_input("Estimated slippage (price)", min_value=0.0, max_value=10.0, value=0.02, step=0.01)
+        profit_usd = st.number_input("Profit target (USD)", min_value=0.01, max_value=1000.0, value=10.0, step=1.0)
+        loss_usd = st.number_input("Loss target (USD)", min_value=0.01, max_value=1000.0, value=10.0, step=1.0)
+        max_spread = st.number_input("Maximum spread (price)", min_value=0.0, max_value=10.0, value=0.5, step=0.05)
+
+    if st.button("Collect MT5 ticks and build training dataset", type="primary"):
+        start = datetime.combine(start_date, start_time, timezone.utc)
+        end = datetime.combine(end_date, end_time, timezone.utc)
+        if end <= start:
+            st.error("The training end must be later than the training start.")
+        else:
+            try:
+                resource_guard(config.data_dir, min_ram_mb=400)
+                with st.status("Preparing training data...", expanded=True) as status:
+                    status.write("Connecting to MT5 and collecting historical ticks...")
+                    with MT5Client(config.mt5) as mt5:
+                        reports = collect_history(
+                            mt5, config.symbol, start, end, config.data_dir,
+                            chunk_minutes=int(chunk_minutes),
+                            max_ticks_per_chunk=100_000,
+                            min_ram_mb=400,
+                        )
+                    status.write(f"Processed {len(reports)} time windows. Loading collected ticks...")
+                    ticks = load_ticks(config.data_dir, config.symbol, start, end, max_rows=400_000)
+                    contract_path = config.data_dir / "raw" / config.symbol / "contract.json"
+                    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+                    assumptions = TradeAssumptions(
+                        contract_size=float(contract["trade_contract_size"]),
+                        lots=float(lots),
+                        commission_per_lot_round_turn=float(commission),
+                        slippage_price=float(slippage),
+                        profit_usd=float(profit_usd),
+                        loss_usd=float(loss_usd),
+                        max_spread_price=float(max_spread),
+                    )
+                    assumptions.validate()
+                    status.write(f"Building features from {len(ticks):,} ticks...")
+                    dataset = create_dataset(ticks, assumptions, int(sample_seconds), max_samples=20_000)
+                    if dataset.empty:
+                        raise RuntimeError("No valid labeled samples were created. Try a longer period or inspect the MT5 history.")
+                    stamp = f"{start:%Y%m%dT%H%M%SZ}_{end:%Y%m%dT%H%M%SZ}"
+                    dataset_path = config.data_dir / "datasets" / f"{config.symbol}_{stamp}.parquet"
+                    save_dataset(dataset, dataset_path, assumptions)
+                    status.update(label="Training dataset ready", state="complete")
+                st.success(f"Created {len(dataset):,} labeled rows at {dataset_path.name}.")
+                st.dataframe(dataset.head(10), width="stretch")
+                st.rerun()
+            except (MT5ConnectionError, RuntimeError, ValueError, OSError, KeyError) as error:
+                st.error(f"Could not prepare training data: {error}")
+
+    st.divider()
     files = sorted((config.data_dir / "datasets").glob("*.parquet"))
     if not files:
-        st.info("No feature dataset yet. Collect history, then run make-dataset from PowerShell.")
+        st.info("No feature dataset yet. Use the workflow above to collect MT5 ticks and build one.")
     else:
         st.dataframe(pd.DataFrame([{"dataset": p.name, "size_mb": round(p.stat().st_size / 1024**2, 2)} for p in files]))
         selected = st.multiselect("Training datasets", files, default=files[-1:], format_func=lambda path: path.name)
@@ -365,7 +433,7 @@ def render_ai_training(config) -> None:
         with st.expander("Feature definitions"):
             st.json(report["feature_definitions"])
     else:
-        st.info("No trained model yet. Training is available from PowerShell.")
+        st.info("No trained model yet. Select a feature dataset above and click Train LightGBM.")
 
 
 def render_ai_research(config) -> None:
