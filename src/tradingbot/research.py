@@ -106,6 +106,24 @@ def build_features(ticks: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def build_m1_features(bars: pd.DataFrame) -> pd.DataFrame:
+    """Build the shared feature contract from one-minute candle closes.
+
+    The model feature contract is shared with tick research so the same
+    training, calibration, and no-trade gates apply. Candle high/low values
+    are reserved for outcome labeling below.
+    """
+    if bars.empty:
+        raise ValueError("No M1 bars supplied.")
+    frame = bars.sort_values("time", kind="stable").reset_index(drop=True)
+    canonical = pd.DataFrame({
+        "time_msc": frame.time.astype("int64") * 1000,
+        "bid": frame.close.astype(float),
+        "ask": frame.close.astype(float),
+    })
+    return build_features(canonical)
+
+
 def pnl_usd(direction: str, entry: float, exit_price: float, assumptions: TradeAssumptions) -> float:
     multiplier = 1 if direction == "BUY" else -1
     return (exit_price - entry) * multiplier * assumptions.contract_size * assumptions.lots - assumptions.commission_per_lot_round_turn * assumptions.lots
@@ -168,6 +186,62 @@ def label_opportunity(ticks: pd.DataFrame, index: int, direction: str, horizon_s
     return result
 
 
+def label_m1_opportunity(bars: pd.DataFrame, index: int, direction: str, horizon_s: int,
+                         assumptions: TradeAssumptions) -> dict:
+    assumptions.validate()
+    if direction not in ("BUY", "SELL") or horizon_s <= 0:
+        raise ValueError("Invalid direction or horizon.")
+    times = bars.time_msc.to_numpy()
+    return _label_m1_arrays(
+        times, bars.close.to_numpy(), bars.high.to_numpy(), bars.low.to_numpy(),
+        index, direction, horizon_s, assumptions,
+    )
+
+
+def _label_m1_arrays(times, closes, highs, lows, index: int, direction: str,
+                     horizon_s: int, assumptions: TradeAssumptions) -> dict:
+    entry = float(closes[index]) + assumptions.slippage_price * (1 if direction == "BUY" else -1)
+    deadline = int(times[index]) + horizon_s * 1000
+    end_index = int(np.searchsorted(times, deadline, side="right"))
+    result = {"outcome": "insufficient", "pnl_usd": np.nan, "holding_s": np.nan,
+              "entry_price": entry, "exit_price": np.nan}
+    if end_index <= index + 1 or int(times[-1]) < deadline:
+        return result
+    gap_limit = max(assumptions.max_gap_seconds, 90.0)
+    previous_time = int(times[index])
+    target_move = assumptions.profit_usd / (assumptions.contract_size * assumptions.lots)
+    stop_move = assumptions.loss_usd / (assumptions.contract_size * assumptions.lots)
+    for item_index in range(index + 1, end_index):
+        item_time = int(times[item_index])
+        if (item_time - previous_time) / 1000 > gap_limit:
+            return result
+        previous_time = item_time
+        if direction == "BUY":
+            profit_hit = float(highs[item_index]) >= entry + target_move
+            loss_hit = float(lows[item_index]) <= entry - stop_move
+            exit_price = entry + target_move if profit_hit else entry - stop_move
+        else:
+            profit_hit = float(lows[item_index]) <= entry - target_move
+            loss_hit = float(highs[item_index]) >= entry + stop_move
+            exit_price = entry - target_move if profit_hit else entry + stop_move
+        # If both barriers occur inside one candle, choose the loss first.
+        if loss_hit:
+            result.update(outcome="loss", pnl_usd=-assumptions.loss_usd - assumptions.commission_per_lot_round_turn * assumptions.lots,
+                          holding_s=(item_time - times[index]) / 1000, exit_price=entry - stop_move if direction == "BUY" else entry + stop_move)
+            return result
+        if profit_hit:
+            result.update(outcome="profit", pnl_usd=assumptions.profit_usd - assumptions.commission_per_lot_round_turn * assumptions.lots,
+                          holding_s=(item_time - times[index]) / 1000, exit_price=exit_price)
+            return result
+    last_index = end_index - 1
+    if (deadline - int(times[last_index])) / 1000 > gap_limit:
+        return result
+    exit_price = float(closes[last_index])
+    result.update(outcome="timeout", pnl_usd=pnl_usd(direction, entry, exit_price, assumptions),
+                  holding_s=(times[last_index] - times[index]) / 1000, exit_price=exit_price)
+    return result
+
+
 def create_dataset(ticks: pd.DataFrame, assumptions: TradeAssumptions, sample_seconds: int = 10,
                    horizons: tuple[int, ...] = (60, 120, 180), max_samples: int = 20_000) -> pd.DataFrame:
     if sample_seconds < 1 or max_samples < 1:
@@ -200,10 +274,53 @@ def create_dataset(ticks: pd.DataFrame, assumptions: TradeAssumptions, sample_se
     return pd.DataFrame.from_records(records)
 
 
-def save_dataset(dataset: pd.DataFrame, path: Path, assumptions: TradeAssumptions) -> None:
+def create_m1_dataset(bars: pd.DataFrame, assumptions: TradeAssumptions, sample_seconds: int = 300,
+                      horizons: tuple[int, ...] = (60, 120, 180), max_samples: int = 20_000) -> pd.DataFrame:
+    if sample_seconds < 60 or max_samples < 1:
+        raise ValueError("M1 sample interval must be at least 60 seconds.")
+    frame = bars.sort_values("time", kind="stable").reset_index(drop=True).copy()
+    frame["time_msc"] = frame.time.astype("int64") * 1000
+    frame["timestamp_utc"] = pd.to_datetime(frame.time_msc, unit="ms", utc=True)
+    required = ["time", "open", "high", "low", "close"]
+    if any(name not in frame for name in required):
+        raise ValueError("M1 data is missing OHLC columns.")
+    features = build_m1_features(frame)
+    times = frame.time_msc.to_numpy()
+    gap_limit = max(90.0, assumptions.max_gap_seconds)
+    bad_quote = (frame.high < frame.low) | (frame.open <= 0) | (frame.high <= 0) | (frame.low <= 0) | (frame.close <= 0)
+    bad_gap = frame.time_msc.diff().fillna(0) > gap_limit * 1000
+    bad_history = (bad_quote | bad_gap).rolling(61, min_periods=61).max().fillna(1).astype(bool)
+    selected = []
+    last = -10**18
+    for index, stamp in enumerate(times):
+        if stamp - last >= sample_seconds * 1000 and index >= 61:
+            selected.append(index)
+            last = stamp
+    if len(selected) > max_samples:
+        raise RuntimeError(f"{len(selected)} samples exceeds limit {max_samples}; increase the decision interval.")
+    columns = list(feature_definitions())
+    times_array = frame.time_msc.to_numpy()
+    closes = frame.close.to_numpy()
+    highs = frame.high.to_numpy()
+    lows = frame.low.to_numpy()
+    records = []
+    for index in selected:
+        row = features.iloc[index]
+        if bad_history.iloc[index] or not np.isfinite(row[columns].to_numpy(dtype=float)).all():
+            continue
+        for horizon in horizons:
+            for direction in ("BUY", "SELL"):
+                label = _label_m1_arrays(times_array, closes, highs, lows, index, direction, horizon, assumptions)
+                records.append({"time_msc": int(row.time_msc), "timestamp_utc": row.timestamp_utc,
+                                "direction": direction, "horizon_s": horizon,
+                                **{name: float(row[name]) for name in columns}, **label})
+    return pd.DataFrame.from_records(records)
+
+
+def save_dataset(dataset: pd.DataFrame, path: Path, assumptions: TradeAssumptions, source: str = "tick") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(".tmp.parquet")
     dataset.to_parquet(temp, index=False, compression="zstd")
     os.replace(temp, path)
     path.with_suffix(".json").write_text(json.dumps({"features": feature_definitions(),
-        "assumptions": asdict(assumptions), "rows": len(dataset)}, indent=2), encoding="utf-8")
+        "assumptions": asdict(assumptions), "rows": len(dataset), "source": source}, indent=2), encoding="utf-8")

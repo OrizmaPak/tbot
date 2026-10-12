@@ -9,7 +9,7 @@ import pytest
 from tradingbot.history import collect_history, load_ticks, normalize_ticks, quality_report
 from tradingbot.model import chronological_split
 from tradingbot.model import FEATURES, load_model, predict, recommend, train_models
-from tradingbot.research import TradeAssumptions, build_features, feature_definitions, label_opportunity, pnl_usd
+from tradingbot.research import TradeAssumptions, build_features, create_m1_dataset, feature_definitions, label_opportunity, pnl_usd
 from tradingbot.simulation import RiskLimits, backtest, performance, simulate_basket
 from tradingbot.storage import TickRecord, TickStore
 from tradingbot.bars import normalize_m1_rates
@@ -50,6 +50,22 @@ def test_m1_normalization_is_utc_sorted_and_deduplicated():
     assert frame.time.tolist() == [60, 120]
     assert str(frame.timestamp_utc.dt.tz) == "UTC"
     assert frame.timestamp_utc.iloc[0] == pd.Timestamp(60, unit="s", tz="UTC")
+
+
+def test_m1_dataset_uses_candle_history_and_shared_model_contract():
+    count = 400
+    times = 1_700_000_000 + np.arange(count) * 60
+    close = 2000 + np.arange(count) * 0.01
+    bars = pd.DataFrame({"time": times, "open": close, "high": close + 0.2,
+                         "low": close - 0.2, "close": close, "tick_volume": 1,
+                         "spread": 1, "real_volume": 1})
+    assumptions = TradeAssumptions(profit_usd=1, loss_usd=1, slippage_price=0,
+                                   commission_per_lot_round_turn=0)
+    dataset = create_m1_dataset(bars, assumptions, sample_seconds=300, max_samples=100)
+    assert not dataset.empty
+    assert set(dataset.direction) == {"BUY", "SELL"}
+    assert set(dataset.horizon_s) == {60, 120, 180}
+    assert set(feature_definitions()).issubset(dataset.columns)
 
 
 def test_history_collection_resume_and_distinct_same_millisecond(tmp_path):

@@ -18,7 +18,8 @@ from tradingbot.history import available_parts, collect_history, load_ticks
 from tradingbot.history import resource_guard
 from tradingbot.model import load_model, predict, recommend, train_models
 from tradingbot.bars import collect_all_m1, load_m1_bars, m1_metadata_path
-from tradingbot.research import TradeAssumptions, create_dataset, save_dataset
+from tradingbot.research import TradeAssumptions, create_m1_dataset, save_dataset
+from tradingbot.simulation import research_patterns
 
 
 DEFAULT_CONFIG = "config.json"
@@ -342,17 +343,9 @@ def render_ai_training(config) -> None:
         st.info("No M1 source data loaded yet.")
     st.divider()
 
-    st.subheader("Create a training dataset")
-    st.caption("This step reads MT5 ticks, creates past-only features and labels, and saves a dataset for training.")
-    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
-    default_start = now - timedelta(hours=24)
-    col_a, col_b, col_c = st.columns(3)
-    start_date = col_a.date_input("Training start date (UTC)", value=default_start.date(), key="training_start_date")
-    start_time = col_a.time_input("Training start time (UTC)", value=default_start.time(), key="training_start_time")
-    end_date = col_b.date_input("Training end date (UTC)", value=now.date(), key="training_end_date")
-    end_time = col_b.time_input("Training end time (UTC)", value=now.time(), key="training_end_time")
-    sample_seconds = col_c.number_input("Decision interval (seconds)", min_value=5, max_value=300, value=10, step=5)
-    chunk_minutes = st.number_input("MT5 collection window (minutes)", min_value=5, max_value=240, value=30, step=5)
+    st.subheader("Build the AI dataset from M1 candles")
+    st.caption("This uses the loaded 100,000-candle M1 dataset directly. It creates past-only features and conservative BUY/SELL labels for research.")
+    sample_seconds = st.number_input("Decision interval (seconds; M1 minimum)", min_value=60, max_value=3600, value=300, step=60)
     with st.expander("Training assumptions"):
         st.caption("These defaults describe the research labels and estimated execution costs. Adjust them to match your broker account.")
         lots = st.number_input("Lots", min_value=0.01, max_value=10.0, value=0.1, step=0.01)
@@ -362,29 +355,19 @@ def render_ai_training(config) -> None:
         loss_usd = st.number_input("Loss target (USD)", min_value=0.01, max_value=1000.0, value=10.0, step=1.0)
         max_spread = st.number_input("Maximum spread (price)", min_value=0.0, max_value=10.0, value=0.5, step=0.05)
 
-    if st.button("Collect MT5 ticks and build training dataset", type="primary"):
-        start = datetime.combine(start_date, start_time, timezone.utc)
-        end = datetime.combine(end_date, end_time, timezone.utc)
-        if end <= start:
-            st.error("The training end must be later than the training start.")
+    if st.button("Build M1 training dataset", type="primary"):
+        if not m1_meta.exists():
+            st.error("Load the M1 candles above first.")
         else:
             try:
                 resource_guard(config.data_dir, min_ram_mb=400)
-                with st.status("Preparing training data...", expanded=True) as status:
-                    status.write("Connecting to MT5 and collecting historical ticks...")
+                with st.status("Building the M1 training dataset...", expanded=True) as status:
+                    bars = load_m1_bars(config.data_dir, config.symbol)
+                    status.write(f"Loaded {len(bars):,} M1 candles.")
                     with MT5Client(config.mt5) as mt5:
-                        reports = collect_history(
-                            mt5, config.symbol, start, end, config.data_dir,
-                            chunk_minutes=int(chunk_minutes),
-                            max_ticks_per_chunk=100_000,
-                            min_ram_mb=400,
-                        )
-                    status.write(f"Processed {len(reports)} time windows. Loading collected ticks...")
-                    ticks = load_ticks(config.data_dir, config.symbol, start, end, max_rows=400_000)
-                    contract_path = config.data_dir / "raw" / config.symbol / "contract.json"
-                    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+                        contract_size = float(mt5.symbol_summary(config.symbol)["trade_contract_size"])
                     assumptions = TradeAssumptions(
-                        contract_size=float(contract["trade_contract_size"]),
+                        contract_size=contract_size,
                         lots=float(lots),
                         commission_per_lot_round_turn=float(commission),
                         slippage_price=float(slippage),
@@ -393,28 +376,27 @@ def render_ai_training(config) -> None:
                         max_spread_price=float(max_spread),
                     )
                     assumptions.validate()
-                    status.write(f"Building features from {len(ticks):,} ticks...")
-                    dataset = create_dataset(ticks, assumptions, int(sample_seconds), max_samples=20_000)
+                    dataset = create_m1_dataset(bars, assumptions, int(sample_seconds), max_samples=20_000)
                     if dataset.empty:
-                        raise RuntimeError("No valid labeled samples were created. Try a longer period or inspect the MT5 history.")
-                    stamp = f"{start:%Y%m%dT%H%M%SZ}_{end:%Y%m%dT%H%M%SZ}"
-                    dataset_path = config.data_dir / "datasets" / f"{config.symbol}_{stamp}.parquet"
-                    save_dataset(dataset, dataset_path, assumptions)
-                    status.update(label="Training dataset ready", state="complete")
-                st.success(f"Created {len(dataset):,} labeled rows at {dataset_path.name}.")
+                        raise RuntimeError("No valid labeled samples were created. Increase the loaded history or review the assumptions.")
+                    stamp = f"{bars.timestamp_utc.iloc[0]:%Y%m%dT%H%M%SZ}_{bars.timestamp_utc.iloc[-1]:%Y%m%dT%H%M%SZ}"
+                    dataset_path = config.data_dir / "datasets" / f"{config.symbol}_M1_{stamp}.parquet"
+                    save_dataset(dataset, dataset_path, assumptions, source="m1")
+                    status.update(label="M1 training dataset ready", state="complete")
+                st.success(f"Created {len(dataset):,} labeled M1 rows at {dataset_path.name}.")
                 st.dataframe(dataset.head(10), width="stretch")
                 st.rerun()
             except (MT5ConnectionError, RuntimeError, ValueError, OSError, KeyError) as error:
-                st.error(f"Could not prepare training data: {error}")
+                st.error(f"Could not build the M1 dataset: {error}")
 
     st.divider()
     files = sorted((config.data_dir / "datasets").glob("*.parquet"))
     if not files:
-        st.info("No feature dataset yet. Use the workflow above to collect MT5 ticks and build one.")
+        st.info("No feature dataset yet. Use the M1 workflow above to build one.")
     else:
         st.dataframe(pd.DataFrame([{"dataset": p.name, "size_mb": round(p.stat().st_size / 1024**2, 2)} for p in files]))
         selected = st.multiselect("Training datasets", files, default=files[-1:], format_func=lambda path: path.name)
-        max_rows = st.number_input("Maximum combined rows", min_value=1000, max_value=200000, value=50000, step=1000)
+        max_rows = st.number_input("Maximum combined rows", min_value=1000, max_value=250000, value=150000, step=1000)
         if st.button("Train LightGBM", type="primary"):
             try:
                 resource_guard(config.data_dir)
@@ -424,6 +406,17 @@ def render_ai_training(config) -> None:
                 st.rerun()
             except (RuntimeError, ValueError, OSError) as error:
                 st.error(str(error))
+        if st.button("Generate trading ideas from selected data"):
+            try:
+                data = pd.concat([pd.read_parquet(path) for path in selected], ignore_index=True)
+                ideas = research_patterns(data)
+                report_path = config.data_dir / "reports" / "patterns.parquet"
+                report_path.parent.mkdir(parents=True, exist_ok=True)
+                ideas.to_parquet(report_path, index=False)
+                st.success(f"Generated {len(ideas):,} research ideas for review.")
+                st.dataframe(ideas, width="stretch")
+            except (RuntimeError, ValueError, OSError) as error:
+                st.error(f"Could not generate ideas: {error}")
     reports = sorted((config.data_dir / "models").glob("*/report.json"), reverse=True)
     if reports:
         report = json.loads(reports[0].read_text(encoding="utf-8"))
@@ -442,7 +435,7 @@ def render_ai_research(config) -> None:
     if report.exists():
         st.dataframe(pd.read_parquet(report), width="stretch")
     else:
-        st.info("Run the research command after generating a labeled dataset.")
+        st.info("Generate trading ideas from the selected M1 dataset in the AI Training tab.")
     walk = config.data_dir / "reports" / "walk_forward.json"
     if walk.exists():
         with st.expander("Walk-forward evaluation"):

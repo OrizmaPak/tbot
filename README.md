@@ -50,6 +50,8 @@ Load the complete one-minute candle history exposed by the connected broker and 
 
 The output is `data/bars/XAUUSD_M1.parquet` with a matching JSON metadata report. MT5 history is constrained by broker retention and the terminal's **Max bars in chart** setting. The default safety limit is 2,000,000 candles; increase it only after checking available disk and RAM with `--max-bars`.
 
+The preferred no-terminal workflow is in the dashboard's **AI Training** tab: click **Build M1 training dataset**, review the assumptions, click **Train LightGBM**, then click **Generate trading ideas from selected data**. The M1 builder uses candle closes for past-only features and candle high/low for conservative target/stop labels. It samples decisions every five minutes by default while using the full loaded candle history for rolling context. Ideas are research hypotheses only; the interface does not place orders.
+
 Generate a bounded interval that has already been collected. The output Parquet contains past-only features and BUY/SELL labels for 60, 120, and 180 seconds. Its adjacent JSON file records feature definitions and execution assumptions.
 
 ```powershell
